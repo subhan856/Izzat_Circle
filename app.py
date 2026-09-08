@@ -1,6 +1,5 @@
-import os
-import uuid
-from datetime import datetime
+import os, re, secrets, sqlite3, urllib.parse
+from datetime import datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -8,1481 +7,332 @@ import folium
 from geopy.distance import geodesic
 from streamlit_folium import st_folium
 
+try:
+    from streamlit_geolocation import streamlit_geolocation
+    GPS_OK = True
+except Exception:
+    GPS_OK = False
 
-# Urdu: App ki basic settings aur page layout yahan set ki ja rahi hain.
-st.set_page_config(
-    page_title="IZZAT CIRCLE",
-    page_icon="🤝",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# Urdu: App ki basic settings yahan set ki ja rahi hain.
+st.set_page_config(page_title="IZZAT CIRCLE", page_icon="🤝", layout="wide")
+DB = "izzat_circle.db"
+UPLOADS = "uploads"
+os.makedirs(UPLOADS, exist_ok=True)
+AREAS = ["Raja Bazar", "Saddar", "Commercial Market", "Satellite Town", "Chaklala", "Committee Chowk", "Murree Road", "Peshawar Road", "6th Road", "Islamabad", "I-8", "G-9", "Other"]
+BAZAARS = ["Raja Bazar", "Anarkali", "Urdu Bazar", "Jodia Bazar"]
+AREA_COORDS = {"Raja Bazar":(33.6007,73.0479),"Saddar":(33.5969,73.0545),"Commercial Market":(33.6440,73.0820),"Satellite Town":(33.6460,73.0735),"Chaklala":(33.6168,73.0992),"Committee Chowk":(33.6087,73.0670),"Murree Road":(33.6250,73.0700),"Peshawar Road":(33.6105,73.0255),"6th Road":(33.6428,73.0710),"Islamabad":(33.6844,73.0479),"I-8":(33.6650,73.0720),"G-9":(33.6880,73.0390),"Other":(33.6844,73.0479)}
 
-APP_NAME = "IZZAT CIRCLE"
-DATA_FILES = {
-    "users": "users.csv",
-    "help": "help_requests.csv",
-    "products": "products.csv",
-    "wholesale": "wholesale_requests.csv",
-    "offers": "offers.csv",
-}
+# Urdu: Green, golden aur light UI ka design yahan apply kiya ja raha hai.
+st.markdown("""
+<style>
+.stApp{background:#f6fbf7;color:#183323}.stApp p,.stApp label,.stApp h1,.stApp h2,.stApp h3,.stApp h4{color:#183323!important}
+[data-testid="stSidebar"]{background:#075c34}.brand{text-align:center;color:#075c34;font-weight:900;font-size:clamp(30px,6vw,48px)}
+.slogan{text-align:center;color:#a27609;font-weight:800;font-size:18px}.mission{background:#075c34;color:white;border:2px solid #c99b2e;border-radius:14px;padding:13px;text-align:center;font-weight:900;margin:12px 0}
+.card{background:white;border:1px solid #d4e3d8;border-top:4px solid #075c34;border-radius:14px;padding:15px;box-shadow:0 2px 10px #0000000d}.gold{color:#a27609!important;font-weight:900}.alert{background:#fff0f0;border:2px solid #c40000;color:#a00000;padding:13px;border-radius:12px;font-weight:900}
+div[data-baseweb="input"]>div,div[data-baseweb="textarea"]>div,div[data-baseweb="select"]>div{background:#fff!important;color:#183323!important;border-color:#bdd0c2!important}input,textarea{background:#fff!important;color:#183323!important;-webkit-text-fill-color:#183323!important}
+</style>
+""", unsafe_allow_html=True)
 
-# Urdu: CSV files ke required columns yahan define kiye ja rahe hain.
-CSV_SCHEMAS = {
-    "users": [
-        "User_ID", "Name", "Phone", "Izzat_Points", "Created_At"
-    ],
-    "help": [
-        "Request_ID", "Name", "Phone", "Problem",
-        "Latitude", "Longitude", "Status",
-        "Izzat_Star", "Helper_Phone",
-        "Senior_Citizen", "Senior_Remarks", "Created_At"
-    ],
-    "products": [
-        "Product_ID", "Dukan_Naam", "Product", "Price",
-        "Image_URL", "Phone", "Latitude", "Longitude", "Created_At"
-    ],
-    "wholesale": [
-        "Request_ID", "Buyer_Name", "Buyer_Phone", "Bazar",
-        "Product_Naam", "Quantity", "Budget", "Created_At"
-    ],
-    "offers": [
-        "Offer_ID", "Request_ID", "Seller_Name", "Seller_Phone",
-        "Rate", "Comment", "Reported", "Report_Reason", "Created_At"
-    ],
-}
+# Urdu: SQLite database ki tamam required tables automatically create ki ja rahi hain.
+def init_db():
+    with sqlite3.connect(DB) as c:
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,phone TEXT UNIQUE NOT NULL,name TEXT,area TEXT,user_type TEXT DEFAULT 'Aam Admi',izzat_points INTEGER DEFAULT 0,created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS help_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,requester_phone TEXT NOT NULL,problem TEXT NOT NULL,latitude REAL NOT NULL,longitude REAL NOT NULL,urgency TEXT NOT NULL,request_type TEXT DEFAULT 'Help',status TEXT DEFAULT 'Open',created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS bazar_items(id INTEGER PRIMARY KEY AUTOINCREMENT,seller_phone TEXT NOT NULL,item TEXT NOT NULL,price REAL NOT NULL,image_path TEXT,area TEXT NOT NULL,latitude REAL,longitude REAL,created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS boli_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,buyer_phone TEXT NOT NULL,product_name TEXT NOT NULL,quantity INTEGER NOT NULL,bazaar TEXT NOT NULL,budget REAL NOT NULL,created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,customer_phone TEXT NOT NULL,product_name TEXT NOT NULL,price REAL NOT NULL,quantity INTEGER NOT NULL,address TEXT NOT NULL,status TEXT DEFAULT 'New',created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS offers(id INTEGER PRIMARY KEY AUTOINCREMENT,boli_request_id INTEGER NOT NULL,seller_phone TEXT NOT NULL,rate REAL NOT NULL,comment TEXT,reported INTEGER DEFAULT 0,created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS poster_orders(id INTEGER PRIMARY KEY AUTOINCREMENT,phone TEXT NOT NULL,name TEXT NOT NULL,university TEXT NOT NULL,poster_type TEXT NOT NULL,details TEXT NOT NULL,file_path TEXT,created_at TEXT NOT NULL);
+        """)
 
-# Urdu: Green aur Golden theme ke liye custom CSS yahan apply ki ja rahi hai.
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background: linear-gradient(180deg, #f5fff8 0%, #ffffff 100%);
-    }
+# Urdu: Database se data DataFrame mein load kiya ja raha hai.
+def q(sql, params=()):
+    with sqlite3.connect(DB) as c: return pd.read_sql_query(sql,c,params=params)
 
-    [data-testid="stSidebar"] {
-        background: #073b22;
-    }
+# Urdu: Database mein INSERT, UPDATE ya DELETE operation execute kiya ja raha hai.
+def x(sql, params=()):
+    with sqlite3.connect(DB) as c:
+        cur=c.execute(sql,params); c.commit(); return cur.lastrowid
 
-    [data-testid="stSidebar"] * {
-        color: #ffffff !important;
-    }
+# Urdu: Current time ka simple timestamp banaya ja raha hai.
+def now(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    .brand {
-        text-align: center;
-        color: #075e32;
-        font-size: 46px;
-        font-weight: 900;
-        letter-spacing: 1px;
-        margin-bottom: 2px;
-    }
+# Urdu: Phone ko WhatsApp ke 92 format mein convert kiya ja raha hai.
+def phone92(phone):
+    d=re.sub(r"\D","",str(phone)); d=d[2:] if d.startswith("92") else d; d=d[4:] if d.startswith("0092") else d; d=d[1:] if d.startswith("0") else d; return "92"+d if d else ""
 
-    .slogan {
-        text-align: center;
-        color: #b8860b;
-        font-size: 19px;
-        font-weight: 800;
-        margin-bottom: 12px;
-    }
+# Urdu: WhatsApp notification ka clickable wa.me link banaya ja raha hai.
+def wa(phone,text): return "https://wa.me/"+phone92(phone)+"?text="+urllib.parse.quote(text)
 
-    .mission {
-        background: linear-gradient(90deg, #075e32, #0b7a43);
-        color: white;
-        padding: 15px;
-        border-radius: 15px;
-        text-align: center;
-        font-weight: 900;
-        font-size: 18px;
-        margin-bottom: 18px;
-    }
+# Urdu: User profile save ya update ki ja rahi hai.
+def save_user(phone,name,area,user_type):
+    x("""INSERT INTO users(phone,name,area,user_type,created_at) VALUES(?,?,?,?,?) ON CONFLICT(phone) DO UPDATE SET name=excluded.name,area=excluded.area,user_type=excluded.user_type""",(phone,name,area,user_type,now()))
 
-    .hero-card {
-        background: white;
-        border: 2px solid #d4af37;
-        border-radius: 16px;
-        padding: 16px;
-        box-shadow: 0 3px 12px rgba(0,0,0,.07);
-        height: 100%;
-    }
+# Urdu: User ka record database se liya ja raha hai.
+def user(phone):
+    d=q("SELECT * FROM users WHERE phone=?",(phone,)); return None if d.empty else d.iloc[0].to_dict()
 
-    .hero-rank {
-        color: #b8860b;
-        font-size: 24px;
-        font-weight: 900;
-    }
+# Urdu: User ke Izzat Points nikale ja rahe hain.
+def points(phone):
+    u=user(phone); return int(u["izzat_points"] or 0) if u else 0
 
-    .helper-alert {
-        background: #ffe6e6;
-        border: 2px solid #d00000;
-        color: #a00000;
-        padding: 15px;
-        border-radius: 12px;
-        font-weight: 900;
-        margin: 10px 0;
-    }
+# Urdu: Izzat Points ko plus ya minus kiya ja raha hai.
+def add_points(phone,n): x("UPDATE users SET izzat_points=MAX(0,izzat_points+?) WHERE phone=?",(int(n),phone))
 
-    .score {
-        color: #b8860b;
-        font-weight: 900;
-    }
+# Urdu: 5 se zyada points wala user Helper hota hai.
+def helper(phone): return points(phone)>5
 
-    div.stButton > button,
-    div.stFormSubmitButton > button {
-        width: 100%;
-        border-radius: 11px;
-        font-weight: 800;
-    }
+# Urdu: Do GPS locations ka geodesic distance kilometers mein nikala ja raha hai.
+def km(a,b,c,d):
+    try:return geodesic((float(a),float(b)),(float(c),float(d))).km
+    except:return 999999
 
-    @media (max-width: 768px) {
-        .brand { font-size: 32px; }
-        .slogan { font-size: 16px; }
-        .mission { font-size: 15px; }
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# Urdu: Har required CSV file ko pehli dafa automatically create kiya ja raha hai.
-def initialize_csv_files():
-    for key, filename in DATA_FILES.items():
-        if not os.path.exists(filename):
-            pd.DataFrame(
-                columns=CSV_SCHEMAS[key]
-            ).to_csv(
-                filename,
-                index=False,
-                encoding="utf-8-sig"
-            )
-
-
-# Urdu: CSV file ko safely DataFrame mein load kiya ja raha hai.
-def load_csv(key):
-    filename = DATA_FILES[key]
+# Urdu: Browser GPS component se user ki live location li ja rahi hai.
+def gps():
+    if not GPS_OK:return None,None
     try:
-        df = pd.read_csv(
-            filename,
-            encoding="utf-8-sig"
-        )
-    except Exception:
-        df = pd.DataFrame()
+        r=streamlit_geolocation(key="gps_widget")
+        if r and r.get("latitude") is not None:return float(r["latitude"]),float(r["longitude"])
+    except:pass
+    return None,None
 
-    return df
+# Urdu: Folium map par markers aur user ke click ko handle kiya ja raha hai.
+def map_view(key,lat=33.6844,lon=73.0479,markers=None,zoom=13):
+    m=folium.Map(location=[lat,lon],zoom_start=zoom,control_scale=True,tiles="OpenStreetMap")
+    for z in markers or []:
+        folium.Marker([z["lat"],z["lon"]],tooltip=z.get("tip","Details"),popup=folium.Popup(z.get("popup",""),max_width=350),icon=folium.Icon(color=z.get("color","green"),icon=z.get("icon","info-sign"))).add_to(m)
+    r=st_folium(m,width=None,height=500,key=key)
+    p=r.get("last_clicked") if r else None
+    return (float(p["lat"]),float(p["lng"])) if p else (None,None)
 
+# Urdu: Header mein IZZAT CIRCLE ka naam, slogan aur mission show kiya ja raha hai.
+def header():
+    st.markdown('<div class="brand">🤝 IZZAT CIRCLE</div><div class="slogan">Madad karo, Izzat pao</div><div class="mission">Hamara Mission: Pehle Izzat, Phir Deal</div>',unsafe_allow_html=True)
 
-# Urdu: DataFrame ko required CSV file mein save kiya ja raha hai.
-def save_csv(key, df):
-    df.to_csv(
-        DATA_FILES[key],
-        index=False,
-        encoding="utf-8-sig"
-    )
+# Urdu: OTP login ke liye 6 digit code generate aur verify kiya ja raha hai.
+def login():
+    header(); st.subheader("📱 Phone OTP Login")
+    p=st.text_input("Phone Number",placeholder="03XXXXXXXXX")
+    if st.button("📲 6-Digit OTP Generate Karein",use_container_width=True):
+        clean=phone92(p)
+        if len(clean)!=12: st.error("Valid Pakistani mobile number enter karein.")
+        else:
+            st.session_state.otp=f"{secrets.randbelow(1000000):06d}"; st.session_state.otp_phone=clean; st.session_state.otp_until=datetime.now()+timedelta(minutes=5); st.rerun()
+    if st.session_state.get("otp"):
+        st.info(f"🔐 Demo OTP: **{st.session_state.otp}** — 5 minutes valid")
+        code=st.text_input("OTP",max_chars=6)
+        if st.button("✅ Verify & Login",use_container_width=True):
+            if datetime.now()>st.session_state.otp_until: st.error("OTP expire ho gaya.")
+            elif code==st.session_state.otp and phone92(p)==st.session_state.otp_phone:
+                st.session_state.logged=st.session_state.otp_phone; st.session_state.pop("otp",None); st.rerun()
+            else: st.error("OTP incorrect hai.")
+    st.caption("Demo OTP local screen par show hota hai. Real SMS OTP ke liye SMS provider/API required hota hai.")
 
+# Urdu: Pehli login ke baad user ki name, area aur type profile save ki ja rahi hai.
+def profile():
+    p=st.session_state.logged; u=user(p)
+    if u and u.get("name"): return True
+    header(); st.subheader("👤 Profile Complete Karein")
+    with st.form("profile"):
+        n=st.text_input("Naam"); a=st.selectbox("Area",AREAS); t=st.radio("User Type",["Aam Admi","Supplier/Helper"]); ok=st.form_submit_button("Profile Save Karein")
+    if ok:
+        if not n.strip(): st.error("Naam required hai.")
+        else: save_user(p,n.strip(),a,t); st.success("Profile save ho gayi."); st.rerun()
+    return False
 
-# Urdu: User ko users.csv mein create ya update kiya ja raha hai.
-def upsert_user(name, phone):
-    users = load_csv("users")
-
-    if users.empty:
-        users = pd.DataFrame(
-            columns=CSV_SCHEMAS["users"]
-        )
-
-    phone = str(phone).strip()
-    name = str(name).strip()
-
-    if not phone:
-        return
-
-    if "Phone" not in users.columns:
-        users = pd.DataFrame(
-            columns=CSV_SCHEMAS["users"]
-        )
-
-    mask = (
-        users["Phone"].astype(str).str.strip()
-        == phone
-    )
-
-    if mask.any():
-        users.loc[mask, "Name"] = name
+# Urdu: Home par paanch concepts aur Mohalla Heroes ki top list show ki ja rahi hai.
+def home():
+    header(); st.title("🌿 Mohalla Community")
+    cards=[("🤝","MOHALLA HELP","Ek Dosre Kaam Aao"),("🍚","DONATION","Rat Ko Koi Bhuka Na Soye"),("🛍️","MOHALLA BAZAR","Apno Se Khareedo"),("💰","BARE BAZAR BOLI","Seedhi Boli, Seedha Rate"),("⭐","IZZAT CIRCLE SYSTEM","Helper Ko Izzat Aur Priority")]
+    cs=st.columns(5)
+    for c,(i,t,d) in zip(cs,cards):
+        with c: st.markdown(f'<div class="card"><h3>{i} {t}</h3><p>{d}</p></div>',unsafe_allow_html=True)
+    st.divider(); st.subheader("🏆 Mohalla Heroes — Top 5")
+    h=q("SELECT name,area,izzat_points FROM users WHERE izzat_points>5 ORDER BY izzat_points DESC LIMIT 5")
+    if h.empty: st.info("Abhi Heroes list empty hai. Help karke Izzat Points earn karein.")
     else:
-        new_user = {
-            "User_ID": "USR-" + uuid.uuid4().hex[:8].upper(),
-            "Name": name,
-            "Phone": phone,
-            "Izzat_Points": 0,
-            "Created_At": datetime.now().strftime(
-                "%Y-%m-%d %H:%M:%S"
-            ),
-        }
-
-        users = pd.concat(
-            [
-                users,
-                pd.DataFrame([new_user])
-            ],
-            ignore_index=True
-        )
-
-    save_csv("users", users)
-
-
-# Urdu: Phone number ke zariye user ka Izzat Score nikala ja raha hai.
-def get_izzat_points(phone):
-    users = load_csv("users")
-
-    if users.empty or "Phone" not in users.columns:
-        return 0
-
-    mask = (
-        users["Phone"].astype(str).str.strip()
-        == str(phone).strip()
-    )
-
-    if not mask.any():
-        return 0
-
-    try:
-        return int(
-            float(
-                users.loc[
-                    mask,
-                    "Izzat_Points"
-                ].iloc[0]
-            )
-        )
-    except Exception:
-        return 0
-
-
-# Urdu: User ke Izzat Points mein positive ya negative points change kiye ja rahe hain.
-def change_izzat_points(phone, points):
-    users = load_csv("users")
-
-    if users.empty or "Phone" not in users.columns:
-        return False
-
-    mask = (
-        users["Phone"].astype(str).str.strip()
-        == str(phone).strip()
-    )
-
-    if not mask.any():
-        return False
-
-    idx = users.index[mask][0]
-
-    try:
-        current = int(
-            float(
-                users.at[
-                    idx,
-                    "Izzat_Points"
-                ]
-            )
-        )
-    except Exception:
-        current = 0
-
-    users.at[
-        idx,
-        "Izzat_Points"
-    ] = max(
-        0,
-        current + int(points)
-    )
-
-    save_csv("users", users)
-    return True
-
-
-# Urdu: 5 se zyada Izzat Points walay user ko Helper identify kiya ja raha hai.
-def is_helper(phone):
-    return get_izzat_points(phone) > 5
-
-
-# Urdu: Do locations ke darmiyan geodesic distance kilometers mein calculate ki ja rahi hai.
-def distance_km(lat1, lon1, lat2, lon2):
-    try:
-        return geodesic(
-            (float(lat1), float(lon1)),
-            (float(lat2), float(lon2))
-        ).km
-    except Exception:
-        return float("inf")
-
-
-# Urdu: Map par click se live latitude aur longitude hasil kiye ja rahe hain.
-def live_location_map(
-    map_key,
-    center_lat=33.6844,
-    center_lon=73.0479,
-    zoom=13,
-    markers=None
-):
-    map_object = folium.Map(
-        location=[
-            center_lat,
-            center_lon
-        ],
-        zoom_start=zoom,
-        control_scale=True
-    )
-
-    if markers:
-        for marker in markers:
-            popup = folium.Popup(
-                marker["popup"],
-                max_width=320
-            )
-
-            folium.Marker(
-                [
-                    marker["lat"],
-                    marker["lon"]
-                ],
-                popup=popup,
-                tooltip=marker.get(
-                    "tooltip",
-                    marker["popup"]
-                ),
-                icon=folium.Icon(
-                    color=marker.get(
-                        "color",
-                        "green"
-                    ),
-                    icon=marker.get(
-                        "icon",
-                        "info-sign"
-                    )
-                )
-            ).add_to(map_object)
-
-    st_folium(
-        map_object,
-        width=None,
-        height=480,
-        key=map_key,
-        returned_objects=[
-            "last_clicked"
-        ]
-    )
-
-    # Urdu: Streamlit session state mein map ka last clicked point read kiya ja raha hai.
-    map_state = st.session_state.get(
-        f"_{map_key}"
-    )
-
-    if map_state:
-        clicked = map_state.get(
-            "last_clicked"
-        )
-        if clicked:
-            return (
-                clicked.get("lat"),
-                clicked.get("lng")
-            )
-
-    return None, None
-
-
-# Urdu: Folium map result se click location hasil karne ka alternate reliable helper yahan hai.
-def get_map_click(
-    map_key,
-    center_lat,
-    center_lon,
-    zoom,
-    markers=None
-):
-    map_object = folium.Map(
-        location=[
-            center_lat,
-            center_lon
-        ],
-        zoom_start=zoom,
-        control_scale=True
-    )
-
-    if markers:
-        for marker in markers:
-            folium.Marker(
-                [
-                    marker["lat"],
-                    marker["lon"]
-                ],
-                popup=folium.Popup(
-                    marker["popup"],
-                    max_width=320
-                ),
-                tooltip=marker.get(
-                    "tooltip",
-                    "Details"
-                ),
-                icon=folium.Icon(
-                    color=marker.get(
-                        "color",
-                        "green"
-                    ),
-                    icon=marker.get(
-                        "icon",
-                        "info-sign"
-                    )
-                )
-            ).add_to(map_object)
-
-    map_data = st_folium(
-        map_object,
-        width=None,
-        height=480,
-        key=map_key
-    )
-
-    if map_data and map_data.get("last_clicked"):
-        point = map_data["last_clicked"]
-        return (
-            float(point["lat"]),
-            float(point["lng"])
-        )
-
-    return None, None
-
-
-# Urdu: Home style header aur Mohalla Heroes ko har page par Unity ke taur par dikhaya ja raha hai.
-def show_header():
-    st.markdown(
-        f'<div class="brand">🤝 {APP_NAME}</div>',
-        unsafe_allow_html=True
-    )
-
-    st.markdown(
-        '<div class="slogan">Madad karo, Izzat pao</div>',
-        unsafe_allow_html=True
-    )
-
-    st.markdown(
-        '<div class="mission">Hamara Mission: Pehle Izzat, Phir Deal</div>',
-        unsafe_allow_html=True
-    )
-
-    users = load_csv("users")
-
-    if not users.empty:
-        users["Izzat_Points"] = pd.to_numeric(
-            users["Izzat_Points"],
-            errors="coerce"
-        ).fillna(0)
-
-        heroes = users[
-            users["Izzat_Points"] > 5
-        ].sort_values(
-            "Izzat_Points",
-            ascending=False
-        ).head(5)
-
-        if not heroes.empty:
-            st.subheader("🏆 Mohalla Heroes")
-            cols = st.columns(5)
-
-            for position, (_, hero) in enumerate(
-                heroes.iterrows(),
-                start=1
-            ):
-                with cols[position - 1]:
-                    st.markdown(
-                        f"""
-                        <div class="hero-card">
-                            <div class="hero-rank">#{position}</div>
-                            <b>🤝 {hero["Name"]}</b>
-                            <br>
-                            <span class="score">
-                            ⭐ {int(hero["Izzat_Points"])} Izzat Points
-                            </span>
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-
-
-# Urdu: Mohalla Help ki requests ko 3KM radius mein filter aur map par show kiya ja raha hai.
-def mohalla_help():
-    st.header("🤝 MOHALLA HELP")
-    st.caption("Ek Dosre Kaam Aao — 3KM ke andar help requests")
-
-    st.info(
-        "📍 Neeche map par apni location par click karein. "
-        "Sirf 3KM ke andar ki open help requests dikhengi."
-    )
-
-    user_lat, user_lon = get_map_click(
-        "help_live_map",
-        33.6844,
-        73.0479,
-        13
-    )
-
-    if user_lat is not None:
-        st.success(
-            f"📍 Your Pin: {user_lat:.6f}, {user_lon:.6f}"
-        )
-
-    with st.form("help_request_form"):
-        st.subheader("🆘 Help Request")
-
-        c1, c2 = st.columns(2)
-
-        with c1:
-            name = st.text_input("Naam")
-            phone = st.text_input("Phone")
-
-        with c2:
-            senior = st.checkbox(
-                "👴 Senior Citizen Request"
-            )
-            senior_remarks = st.text_input(
-                "Senior Citizen Remarks"
-            )
-
-        problem = st.text_area(
-            "Problem / Kis madad ki zaroorat hai?"
-        )
-
-        submit = st.form_submit_button(
-            "📤 Help Request Post Karein"
-        )
-
-    if submit:
-        if not name.strip() or not phone.strip():
-            st.error(
-                "Naam aur Phone required hain."
-            )
-        elif not problem.strip():
-            st.error(
-                "Problem likhna zaroori hai."
-            )
-        elif user_lat is None:
-            st.error(
-                "Map par apni location pin karein."
-            )
-        else:
-            upsert_user(
-                name,
-                phone
-            )
-
-            requests = load_csv("help")
-
-            new_request = {
-                "Request_ID": "HELP-" + uuid.uuid4().hex[:8].upper(),
-                "Name": name.strip(),
-                "Phone": phone.strip(),
-                "Problem": problem.strip(),
-                "Latitude": user_lat,
-                "Longitude": user_lon,
-                "Status": "Open",
-                "Izzat_Star": "",
-                "Helper_Phone": "",
-                "Senior_Citizen": "Yes" if senior else "No",
-                "Senior_Remarks": senior_remarks.strip(),
-                "Created_At": datetime.now().strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
-            }
-
-            requests = pd.concat(
-                [
-                    requests,
-                    pd.DataFrame([new_request])
-                ],
-                ignore_index=True
-            )
-
-            save_csv(
-                "help",
-                requests
-            )
-
-            st.success(
-                "✅ Help request save ho gayi."
-            )
-            st.rerun()
-
-    st.divider()
-    st.subheader("📍 3KM ke andar Help Requests")
-
-    requests = load_csv("help")
-
-    if requests.empty:
-        st.info(
-            "Abhi koi help request available nahi."
-        )
-        return
-
-    if user_lat is None:
-        st.warning(
-            "Nearby requests dekhne ke liye map par pin karein."
-        )
-        return
-
-    open_requests = requests[
-        requests["Status"].astype(str) == "Open"
-    ].copy()
-
-    if open_requests.empty:
-        st.success(
-            "Koi open help request nahi."
-        )
-        return
-
-    nearby = []
-
-    for _, row in open_requests.iterrows():
-        dist = distance_km(
-            user_lat,
-            user_lon,
-            row["Latitude"],
-            row["Longitude"]
-        )
-
-        if dist <= 3:
-            nearby.append(
-                (
-                    row,
-                    round(dist, 2)
-                )
-            )
-
-    if not nearby:
-        st.info(
-            "3KM ke andar koi open help request nahi mili."
-        )
-        return
-
-    markers = []
-
-    for row, dist in nearby:
-        senior_text = (
-            "Yes"
-            if str(row["Senior_Citizen"]).lower()
-            == "yes"
-            else "No"
-        )
-
-        markers.append(
-            {
-                "lat": float(row["Latitude"]),
-                "lon": float(row["Longitude"]),
-                "tooltip": f"{row['Name']} — {dist} KM",
-                "popup": (
-                    f"<b>🤝 {row['Name']}</b><br>"
-                    f"Problem: {row['Problem']}<br>"
-                    f"Distance: {dist} KM<br>"
-                    f"Senior Citizen: {senior_text}<br>"
-                    f"Remarks: {row['Senior_Remarks']}"
-                ),
-                "color": "red",
-                "icon": "plus"
-            }
-        )
-
-    get_map_click(
-        "help_requests_map",
-        user_lat,
-        user_lon,
-        13,
-        markers
-    )
-
-    for row, dist in nearby:
-        st.markdown(
-            f"### 🤝 {row['Name']} — {dist} KM"
-        )
-        st.write(
-            f"**Problem:** {row['Problem']}"
-        )
-
-        if str(row["Senior_Citizen"]).lower() == "yes":
-            st.warning(
-                f"👴 Senior Citizen: {row['Senior_Remarks']}"
-            )
-
-        with st.expander(
-            "⭐ Help Complete / Izzat Star"
-        ):
-            helper_name = st.text_input(
-                "Helper Name",
-                key=f"helper_name_{row['Request_ID']}"
-            )
-
-            helper_phone = st.text_input(
-                "Helper Phone",
-                key=f"helper_phone_{row['Request_ID']}"
-            )
-
-            if st.button(
-                "🤝 Main ne help kar di",
-                key=f"complete_{row['Request_ID']}"
-            ):
-                if not helper_name.strip() or not helper_phone.strip():
-                    st.error(
-                        "Helper Name aur Phone required hain."
-                    )
-                else:
-                    upsert_user(
-                        helper_name,
-                        helper_phone
-                    )
-
-                    requests = load_csv("help")
-                    mask = (
-                        requests["Request_ID"].astype(str)
-                        == str(row["Request_ID"])
-                    )
-
-                    requests.loc[
-                        mask,
-                        "Status"
-                    ] = "Completed"
-
-                    requests.loc[
-                        mask,
-                        "Helper_Phone"
-                    ] = helper_phone.strip()
-
-                    save_csv(
-                        "help",
-                        requests
-                    )
-
-                    st.success(
-                        "Help complete mark ho gayi."
-                    )
-
-                    st.session_state[
-                        f"rate_request_{row['Request_ID']}"
-                    ] = True
-
-                    st.rerun()
-
-            if st.session_state.get(
-                f"rate_request_{row['Request_ID']}",
-                False
-            ):
-                star = st.slider(
-                    "Izzat Star",
-                    1,
-                    5,
-                    5,
-                    key=f"star_{row['Request_ID']}"
-                )
-
-                if st.button(
-                    "⭐ Izzat Star Save Karein",
-                    key=f"save_star_{row['Request_ID']}"
-                ):
-                    requests = load_csv("help")
-                    mask = (
-                        requests["Request_ID"].astype(str)
-                        == str(row["Request_ID"])
-                    )
-
-                    requests.loc[
-                        mask,
-                        "Izzat_Star"
-                    ] = int(star)
-
-                    save_csv(
-                        "help",
-                        requests
-                    )
-
-                    # Urdu: Helper ko milne wali star rating ko Izzat Points mein add kiya ja raha hai.
-                    change_izzat_points(
-                        helper_phone,
-                        int(star)
-                    )
-
-                    st.success(
-                        f"⭐ {star} Izzat Stars save ho gaye."
-                    )
-
-                    st.session_state.pop(
-                        f"rate_request_{row['Request_ID']}",
-                        None
-                    )
-
-                    st.rerun()
-
-
-# Urdu: Mohalla Bazar mein seller products add aur customer ke 3KM nearby products show kiye ja rahe hain.
-def mohalla_bazar():
-    st.header("🛍️ MOHALLA BAZAR")
-    st.caption("Apno Se Khareedo — 3KM ke andar local products")
-
-    st.subheader("➕ Seller Product Add Karein")
-
-    seller_lat, seller_lon = get_map_click(
-        "seller_pin_map",
-        33.6844,
-        73.0479,
-        13
-    )
-
-    if seller_lat is not None:
-        st.success(
-            f"📍 Seller Pin: {seller_lat:.6f}, {seller_lon:.6f}"
-        )
-
-    with st.form("product_form"):
-        c1, c2 = st.columns(2)
-
-        with c1:
-            shop_name = st.text_input(
-                "Dukan Naam"
-            )
-            seller_phone = st.text_input(
-                "Seller Phone"
-            )
-            product_name = st.text_input(
-                "Product"
-            )
-
-        with c2:
-            price = st.number_input(
-                "Price (Rs.)",
-                min_value=0.0,
-                step=10.0
-            )
-            image_url = st.text_input(
-                "Image URL — Optional"
-            )
-
-        add_product = st.form_submit_button(
-            "🛒 Product Add Karein"
-        )
-
-    if add_product:
-        if (
-            not shop_name.strip()
-            or not seller_phone.strip()
-            or not product_name.strip()
-        ):
-            st.error(
-                "Dukan, Seller Phone aur Product required hain."
-            )
-        elif seller_lat is None:
-            st.error(
-                "Product ki location map par pin karein."
-            )
-        else:
-            upsert_user(
-                shop_name,
-                seller_phone
-            )
-
-            products = load_csv("products")
-
-            new_product = {
-                "Product_ID": "PROD-" + uuid.uuid4().hex[:8].upper(),
-                "Dukan_Naam": shop_name.strip(),
-                "Product": product_name.strip(),
-                "Price": price,
-                "Image_URL": image_url.strip(),
-                "Phone": seller_phone.strip(),
-                "Latitude": seller_lat,
-                "Longitude": seller_lon,
-                "Created_At": datetime.now().strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
-            }
-
-            products = pd.concat(
-                [
-                    products,
-                    pd.DataFrame([new_product])
-                ],
-                ignore_index=True
-            )
-
-            save_csv(
-                "products",
-                products
-            )
-
-            st.success(
-                "✅ Product Mohalla Bazar mein add ho gaya."
-            )
-            st.rerun()
-
-    st.divider()
-    st.subheader("📍 Customer Location")
-
-    customer_lat, customer_lon = get_map_click(
-        "customer_bazar_map",
-        33.6844,
-        73.0479,
-        13
-    )
-
-    if customer_lat is None:
-        st.info(
-            "Map par apna customer pin lagayein; phir 3KM products neeche show honge."
-        )
-        return
-
-    st.success(
-        f"📍 Customer Pin: {customer_lat:.6f}, {customer_lon:.6f}"
-    )
-
-    products = load_csv("products")
-
-    if products.empty:
-        st.info(
-            "Abhi koi product available nahi."
-        )
-        return
-
-    nearby = []
-
-    for _, row in products.iterrows():
-        dist = distance_km(
-            customer_lat,
-            customer_lon,
-            row["Latitude"],
-            row["Longitude"]
-        )
-
-        if dist <= 3:
-            nearby.append(
-                (
-                    row,
-                    round(dist, 2)
-                )
-            )
-
-    st.subheader("🛍️ 3KM ke andar Products")
-
-    if not nearby:
-        st.warning(
-            "3KM ke andar koi product nahi mila."
-        )
-        return
-
-    markers = []
-
-    for row, dist in nearby:
-        score = get_izzat_points(
-            row["Phone"]
-        )
-
-        markers.append(
-            {
-                "lat": float(row["Latitude"]),
-                "lon": float(row["Longitude"]),
-                "tooltip": (
-                    f"{row['Product']} — "
-                    f"{dist} KM"
-                ),
-                "popup": (
-                    f"<b>{row['Product']}</b><br>"
-                    f"Dukan: {row['Dukan_Naam']}<br>"
-                    f"Price: Rs. {float(row['Price']):,.0f}<br>"
-                    f"Izzat Score: ⭐ {score}<br>"
-                    f"Phone: {row['Phone']}<br>"
-                    f"Distance: {dist} KM"
-                ),
-                "color": "green",
-                "icon": "shopping-cart"
-            }
-        )
-
-    get_map_click(
-        "nearby_products_map",
-        customer_lat,
-        customer_lon,
-        13,
-        markers
-    )
-
-    for row, dist in nearby:
-        score = get_izzat_points(
-            row["Phone"]
-        )
-
+        cs=st.columns(min(5,len(h)))
+        for i,(_,r) in enumerate(h.iterrows()):
+            with cs[i]: st.markdown(f'<div class="card"><b>#{i+1} 🤝 {r.name}</b><p>{r.area}</p><span class="gold">⭐ {int(r.izzat_points)} Points</span></div>',unsafe_allow_html=True)
+    st.divider(); st.subheader("✨ IZZAT CIRCLE Extras")
+    a,b,c=st.columns(3)
+    with a:
+        if st.button("🛒 IZZAT CIRCLE Shop",use_container_width=True): st.session_state.extra="shop"
+    with b:
+        if st.button("🎨 Poster Service",use_container_width=True): st.session_state.extra="poster"
+    with c:
+        if st.button("📁 Portfolio",use_container_width=True): st.session_state.extra="portfolio"
+    if st.session_state.get("extra")=="shop": shop()
+    elif st.session_state.get("extra")=="poster": poster()
+    elif st.session_state.get("extra")=="portfolio": portfolio()
+    st.divider(); st.subheader("📍 Strong Live Map")
+    la,lo=gps();
+    if st.button("📍 Meri Location",use_container_width=True): st.rerun()
+    if la is not None: st.success(f"GPS: {la:.6f}, {lo:.6f}")
+    community_map("home_map",la,lo)
+
+# Urdu: Helpers, suppliers aur donation points ko alag toggleable layers mein map par dikhaya ja raha hai.
+def community_map(key,la=None,lo=None):
+    m=folium.Map(location=[la or 33.6844,lo or 73.0479],zoom_start=12,tiles="OpenStreetMap")
+    hg=folium.FeatureGroup(name="🤝 Helpers",show=True); sg=folium.FeatureGroup(name="🏪 Suppliers",show=True); dg=folium.FeatureGroup(name="🍚 Donation Points",show=True)
+    u=q("SELECT name,phone,area,izzat_points FROM users WHERE izzat_points>5")
+    for _,r in u.iterrows():
+        a=AREA_COORDS.get(r.area,AREA_COORDS["Other"]); link=wa(r.phone,f"Assalam-o-Alaikum {r.name}, IZZAT CIRCLE se rabta kar raha hoon."); pop=f"<b>🤝 {r.name}</b><br>Area: {r.area}<br>⭐ Izzat: {int(r.izzat_points)}<br>Phone: {r.phone}<br><a href='{link}' target='_blank'>WhatsApp Pe Rabta</a>"; folium.Marker(a,tooltip=f"Helper: {r.name}",popup=folium.Popup(pop,max_width=300),icon=folium.Icon(color="green",icon="heart")).add_to(hg)
+    it=q("SELECT b.*,u.name seller_name,u.izzat_points FROM bazar_items b LEFT JOIN users u ON u.phone=b.seller_phone WHERE b.latitude IS NOT NULL")
+    for _,r in it.iterrows():
+        link=wa(r.seller_phone,f"Assalam-o-Alaikum, {r.item} ke liye IZZAT CIRCLE par rabta kar raha hoon."); pop=f"<b>🏪 {r.item}</b><br>Seller: {r.seller_name}<br>⭐ Izzat: {int(r.izzat_points or 0)}<br><a href='{link}' target='_blank'>WhatsApp Pe Rabta</a>"; folium.Marker([r.latitude,r.longitude],tooltip=r.item,popup=folium.Popup(pop,max_width=300),icon=folium.Icon(color="blue",icon="shopping-cart")).add_to(sg)
+    d=q("SELECT h.*,u.name FROM help_requests h LEFT JOIN users u ON u.phone=h.requester_phone WHERE h.request_type='Donation' AND h.status='Open'")
+    for _,r in d.iterrows():
+        link=wa(r.requester_phone,"Assalam-o-Alaikum, IZZAT CIRCLE donation request ke liye rabta kar raha hoon."); pop=f"<b>🍚 Donation Needed</b><br>{r.problem}<br>Urgency: {r.urgency}<br><a href='{link}' target='_blank'>WhatsApp Pe Rabta</a>"; folium.Marker([r.latitude,r.longitude],tooltip="Donation Point",popup=folium.Popup(pop,max_width=300),icon=folium.Icon(color="orange",icon="gift")).add_to(dg)
+    if la is not None: folium.Marker([la,lo],tooltip="Meri Location",icon=folium.Icon(color="red",icon="user")).add_to(m)
+    hg.add_to(m);sg.add_to(m);dg.add_to(m);folium.LayerControl(collapsed=False).add_to(m);st_folium(m,width=None,height=520,key=key)
+
+# Urdu: Mohalla Help aur Donation requests create karke 2KM ke andar filter ki ja rahi hain.
+def help_page():
+    header(); st.header("🤝 MOHALLA HELP + DONATION"); st.caption("Ek Dosre Kaam Aao • 2KM nearby filter")
+    la,lo=gps();
+    if st.button("📍 Meri Location",key="help_gps",use_container_width=True): st.rerun()
+    with st.form("help_form"):
+        problem=st.text_area("Problem / Zaroorat"); urgency=st.selectbox("Urgency",["Normal","Important","Urgent"]); typ=st.radio("Request Type",["Help","Donation"]); ok=st.form_submit_button("📢 Request Post Karein")
+    cla,clo=map_view("help_pin",la or 33.6844,lo or 73.0479,zoom=13); sla=cla if cla is not None else la; slo=clo if clo is not None else lo
+    if ok:
+        if not problem.strip(): st.error("Problem required hai.")
+        elif sla is None: st.error("Meri Location ya map click se location select karein.")
+        else: x("INSERT INTO help_requests(requester_phone,problem,latitude,longitude,urgency,request_type,created_at) VALUES(?,?,?,?,?,?,?)",(st.session_state.logged,problem.strip(),sla,slo,urgency,typ,now()));st.success("✅ Request save ho gayi.");st.rerun()
+    st.divider(); st.subheader("📍 Nearby Requests — 2KM")
+    if la is None: st.warning("Nearby filter ke liye GPS location enable karein."); return
+    d=q("SELECT h.*,u.name,u.area FROM help_requests h LEFT JOIN users u ON u.phone=h.requester_phone WHERE h.status='Open' ORDER BY h.id DESC")
+    for _,r in d.iterrows():
+        dist=km(la,lo,r.latitude,r.longitude)
+        if dist>2: continue
+        link=wa(r.requester_phone,f"Assalam-o-Alaikum, IZZAT CIRCLE par aapki request '{r.problem}' ke liye help karna chahta hoon.")
         with st.container(border=True):
-            c1, c2 = st.columns([1, 2])
+            st.markdown(f"### {'🚨' if r.urgency=='Urgent' else '🤝'} {r.problem}"); st.write(f"**Area:** {r.area} • **Distance:** {dist:.2f}KM • **Urgency:** {r.urgency}")
+            st.markdown(f"[📲 WhatsApp Pe Rabta]({link})")
+            if r.request_type=="Help" and r.requester_phone!=st.session_state.logged:
+                if st.button("🤝 Main Help Karunga",key=f"accept_{r.id}"):
+                    x("UPDATE help_requests SET status='In Progress' WHERE id=?",(int(r.id),)); add_points(st.session_state.logged,1); st.success("Help accept ho gayi. WhatsApp se requester ko contact karein."); st.rerun()
 
-            with c1:
-                if str(row["Image_URL"]).strip():
-                    st.image(
-                        row["Image_URL"],
-                        use_container_width=True
-                    )
-                else:
-                    st.markdown(
-                        "### 🛍️"
-                    )
-
-            with c2:
-                st.markdown(
-                    f"### {row['Product']}"
-                )
-                st.write(
-                    f"**Dukan:** {row['Dukan_Naam']}"
-                )
-                st.write(
-                    f"**Price:** Rs. {float(row['Price']):,.0f}"
-                )
-                st.markdown(
-                    f'<span class="score">⭐ Seller Izzat Score: {score}</span>',
-                    unsafe_allow_html=True
-                )
-                st.write(
-                    f"📍 Distance: {dist} KM"
-                )
-
-
-# Urdu: Bare Bazar Boli mein buyer request create, sellers offers submit aur offers compare kiye ja rahe hain.
-def bare_bazar_boli():
-    st.header("🏪 BARE BAZAR BOLI")
-    st.caption("Seedhi Boli, Seedha Rate")
-
-    bazars = [
-        "Raja Bazar",
-        "Anarkali",
-        "Urdu Bazar",
-        "Jodia Bazar"
-    ]
-
-    st.subheader("1️⃣ Buyer Request")
-
-    with st.form("wholesale_request_form"):
-        c1, c2 = st.columns(2)
-
-        with c1:
-            buyer_name = st.text_input(
-                "Buyer Name"
-            )
-            buyer_phone = st.text_input(
-                "Buyer Phone"
-            )
-            bazar = st.selectbox(
-                "Bazar Select Karein",
-                bazars
-            )
-
-        with c2:
-            product_name = st.text_input(
-                "Product Naam"
-            )
-            quantity = st.number_input(
-                "Quantity",
-                min_value=1,
-                step=1
-            )
-            budget = st.number_input(
-                "Budget (Rs.)",
-                min_value=0.0,
-                step=100.0
-            )
-
-        create_request = st.form_submit_button(
-            "📢 Boli Request Post Karein"
-        )
-
-    if create_request:
-        if (
-            not buyer_name.strip()
-            or not buyer_phone.strip()
-            or not product_name.strip()
-        ):
-            st.error(
-                "Buyer Name, Phone aur Product required hain."
-            )
+# Urdu: Mohalla Bazar mein seller item add aur customer ke 3KM products show kiye ja rahe hain.
+def bazar_page():
+    header(); st.header("🛍️ MOHALLA BAZAR"); st.caption("Apno Se Khareedo • 3KM radius")
+    la,lo=gps();
+    with st.form("item_form"):
+        item=st.text_input("Item"); price=st.number_input("Price (Rs.)",min_value=1.0,step=10.0); area=st.selectbox("Area",AREAS); img=st.file_uploader("Image",type=["png","jpg","jpeg","webp"]); ok=st.form_submit_button("🛍️ Item Publish Karein")
+    if ok:
+        n=q("SELECT COUNT(*) n FROM bazar_items WHERE seller_phone=?",(st.session_state.logged,)).iloc[0].n
+        if int(n)>=3: st.error("Maximum 3 items list kar sakte hain.")
+        elif not item.strip(): st.error("Item required hai.")
         else:
-            upsert_user(
-                buyer_name,
-                buyer_phone
-            )
+            path=""
+            if img:
+                path=os.path.join(UPLOADS,secrets.token_hex(5)+"_"+re.sub(r"[^a-zA-Z0-9_.-]","_",img.name)); open(path,"wb").write(img.getbuffer())
+            x("INSERT INTO bazar_items(seller_phone,item,price,image_path,area,latitude,longitude,created_at) VALUES(?,?,?,?,?,?,?,?)",(st.session_state.logged,item.strip(),price,path,area,la,lo,now()));st.success("✅ Item publish ho gaya.");st.rerun()
+    area_filter=st.selectbox("Filter by Area",["All"]+AREAS); items=q("SELECT b.*,u.name seller_name,u.izzat_points FROM bazar_items b LEFT JOIN users u ON u.phone=b.seller_phone ORDER BY b.id DESC")
+    if area_filter!="All": items=items[items.area==area_filter]
+    near=[]
+    for _,r in items.iterrows():
+        if la is not None and pd.notna(r.latitude) and pd.notna(r.longitude):
+            d=km(la,lo,r.latitude,r.longitude)
+            if d<=3: near.append((r,d))
+        elif la is None: near.append((r,None))
+    if la is not None: map_view("bazar_map",la,lo,[{"lat":r.latitude,"lon":r.longitude,"tip":r.item,"popup":f"<b>{r.item}</b><br>⭐ Izzat: {int(r.izzat_points or 0)}"} for r,d in near if pd.notna(r.latitude)],13)
+    cs=st.columns(2)
+    for i,(r,d) in enumerate(near):
+        with cs[i%2]:
+            with st.container(border=True):
+                if r.image_path and os.path.exists(r.image_path): st.image(r.image_path,use_container_width=True)
+                st.markdown(f"### 🛍️ {r.item}"); st.write(f"**Seller:** {r.seller_name}"); st.write(f"**Price:** Rs. {r.price:,.0f}"); st.markdown(f'<span class="gold">⭐ Seller Izzat Score: {int(r.izzat_points or 0)}</span>',unsafe_allow_html=True); st.write(f"**Area:** {r.area}"+(f" • **{d:.2f}KM**" if d is not None else "")); st.markdown(f"[📲 Order on WhatsApp]({wa(r.seller_phone,f'Assalam-o-Alaikum, {r.item} ke liye IZZAT CIRCLE par order karna hai.')})")
 
-            requests = load_csv("wholesale")
-
-            request_id = (
-                "REQ-"
-                + uuid.uuid4().hex[:8].upper()
-            )
-
-            new_request = {
-                "Request_ID": request_id,
-                "Buyer_Name": buyer_name.strip(),
-                "Buyer_Phone": buyer_phone.strip(),
-                "Bazar": bazar,
-                "Product_Naam": product_name.strip(),
-                "Quantity": int(quantity),
-                "Budget": budget,
-                "Created_At": datetime.now().strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
-            }
-
-            requests = pd.concat(
-                [
-                    requests,
-                    pd.DataFrame([new_request])
-                ],
-                ignore_index=True
-            )
-
-            save_csv(
-                "wholesale",
-                requests
-            )
-
-            st.success(
-                f"📢 Request post ho gayi. Request ID: {request_id}"
-            )
-
-    st.divider()
-    st.subheader("2️⃣ Active Boli Requests")
-
-    requests = load_csv("wholesale")
-
-    if requests.empty:
-        st.info(
-            "Abhi koi Boli request nahi."
-        )
-        return
-
-    for _, request in requests.iloc[::-1].iterrows():
-        request_id = str(
-            request["Request_ID"]
-        )
-
-        buyer_phone_value = str(
-            request["Buyer_Phone"]
-        )
-
-        helper = is_helper(
-            buyer_phone_value
-        )
-
+# Urdu: Bare Bazar Boli mein buyer request aur supplier offers save aur score ke mutabiq sort kiye ja rahe hain.
+def boli_page():
+    header(); st.header("💰 BARE BAZAR BOLI"); st.caption("Seedhi Boli, Seedha Rate")
+    if helper(st.session_state.logged): st.markdown('<div class="alert">🚨 YE IZZAT CIRCLE MEMBER HAI. IZZAT SE BAAT KARO</div>',unsafe_allow_html=True)
+    with st.form("boli_form"):
+        p=st.text_input("Product Name"); qty=st.number_input("Quantity",min_value=1,step=1); b=st.selectbox("Bazaar",BAZAARS); bud=st.number_input("Budget (Rs.)",min_value=1.0,step=100.0); ok=st.form_submit_button("📢 Boli Request Post Karein")
+    if ok:
+        if not p.strip(): st.error("Product name required hai.")
+        else: x("INSERT INTO boli_requests(buyer_phone,product_name,quantity,bazaar,budget,created_at) VALUES(?,?,?,?,?,?)",(st.session_state.logged,p.strip(),qty,b,bud,now()));st.success("✅ Boli Request Post ho gayi.");st.rerun()
+    req=q("SELECT b.*,u.name buyer_name,u.izzat_points buyer_points FROM boli_requests b LEFT JOIN users u ON u.phone=b.buyer_phone ORDER BY b.id DESC")
+    for _,r in req.iterrows():
         with st.container(border=True):
-            st.markdown(
-                f"### 🏪 {request['Product_Naam']} — {request['Bazar']}"
-            )
+            st.markdown(f"### 🏪 {r.product_name} — {r.bazaar}"); st.write(f"Buyer: **{r.buyer_name}** • Qty: **{int(r.quantity)}** • Budget: **Rs. {r.budget:,.0f}**")
+            if int(r.buyer_points or 0)>5: st.markdown('<div class="alert">🚨 YE IZZAT CIRCLE MEMBER HAI. IZZAT SE BAAT KARO</div>',unsafe_allow_html=True)
+            u=user(st.session_state.logged)
+            if u and u["user_type"]=="Supplier/Helper":
+                with st.form(f"offer_{r.id}"):
+                    rate=st.number_input("Aap ka Rate (Rs.)",min_value=1.0,step=10.0,key=f"rate{r.id}"); comment=st.text_input("Comment",key=f"comment{r.id}"); send=st.form_submit_button("💼 Offer Dein")
+                if send: x("INSERT INTO offers(boli_request_id,seller_phone,rate,comment,created_at) VALUES(?,?,?,?,?)",(r.id,st.session_state.logged,rate,comment,now()));st.success("Offer save ho gayi.");st.rerun()
+            offers=q("SELECT o.*,u.name seller_name,u.izzat_points FROM offers o LEFT JOIN users u ON u.phone=o.seller_phone WHERE o.boli_request_id=? ORDER BY u.izzat_points DESC,o.rate ASC",(r.id,))
+            for _,o in offers.iterrows():
+                a,c,d=st.columns([2,1,2]); a.write(f"**{o.seller_name}** ⭐ {int(o.izzat_points or 0)}"); c.write(f"Rs. {o.rate:,.0f}"); d.write(o.comment or "No comment")
+                if r.buyer_phone==st.session_state.logged and st.button("🚩 Report",key=f"rep{o.id}"):
+                    add_points(o.seller_phone,-5); x("UPDATE offers SET reported=1 WHERE id=?",(o.id,));st.warning("Seller report ho gaya aur 5 points cut ho gaye.");st.rerun()
 
-            c1, c2, c3, c4 = st.columns(4)
+# Urdu: Izzat Circle System current score aur rules display karta hai.
+def system_page():
+    header(); st.header("⭐ IZZAT CIRCLE SYSTEM"); u=user(st.session_state.logged); p=points(st.session_state.logged); a,b,c=st.columns(3); a.metric("Izzat Points",p); b.metric("Status","HELPER" if p>5 else "Aam Admi"); c.metric("Type",u["user_type"] if u else "-"); st.markdown("- ⭐ Izzat_Points > 5 = Helper\n- 🚨 Helper ko Boli mein red alert\n- 📊 Offers Izzat Score ke hisaab se priority\n- 🚩 Report par seller ke 5 points minus")
 
-            with c1:
-                st.write(
-                    f"**Buyer:** {request['Buyer_Name']}"
-                )
+# Urdu: Unity page community stats aur bhaichara message show karta hai.
+def unity_page():
+    header(); st.header("🤲 UNITY / BHAICHARA"); st.subheader("Rat Ko Koi Bhuka Na Soye"); a,b,c=st.columns(3); a.metric("Help",q("SELECT COUNT(*) n FROM help_requests WHERE request_type='Help'").iloc[0].n); b.metric("Donation",q("SELECT COUNT(*) n FROM help_requests WHERE request_type='Donation'").iloc[0].n); c.metric("Heroes",q("SELECT COUNT(*) n FROM users WHERE izzat_points>5").iloc[0].n); st.success("🤝 Apne mohalla mein jis ko zaroorat ho, us tak izzat ke saath madad pohanchana hi IZZAT CIRCLE ka mission hai.")
 
-            with c2:
-                st.write(
-                    f"**Qty:** {request['Quantity']}"
-                )
+# Urdu: COD shop ke demo products aur orders database mein save kiye ja rahe hain.
+def shop():
+    st.subheader("🛒 IZZAT CIRCLE Shop — COD")
+    products=[("Kitchen Organizer",1299), ("LED Study Lamp",1499), ("Storage Box",999), ("Mobile Stand",599)]
+    cs=st.columns(2)
+    for i,(name,price) in enumerate(products):
+        with cs[i%2]:
+            with st.container(border=True):
+                st.markdown(f"### 🛍️ {name}"); st.write(f"Rs. {price:,.0f}")
+                with st.form(f"cod{i}"):
+                    qty=st.number_input("Quantity",1,10,1,key=f"q{i}"); addr=st.text_input("Address",key=f"a{i}"); ok=st.form_submit_button("📦 Order COD")
+                if ok:
+                    if not addr.strip(): st.error("Address required hai.")
+                    else: x("INSERT INTO orders(customer_phone,product_name,price,quantity,address,created_at) VALUES(?,?,?,?,?,?)",(st.session_state.logged,name,price,qty,addr,now()));st.success("COD order save ho gaya.")
 
-            with c3:
-                st.write(
-                    f"**Budget:** Rs. {float(request['Budget']):,.0f}"
-                )
+# Urdu: Poster service order aur uploaded file ko uploads folder aur database mein save kiya ja raha hai.
+def poster():
+    st.subheader("🎨 Poster Design Service")
+    with st.form("poster"):
+        n=st.text_input("Name"); un=st.text_input("University"); typ=st.selectbox("Poster Type",["Business","Academic","Competition"]); details=st.text_area("Details"); f=st.file_uploader("File Upload",type=["png","jpg","jpeg","pdf","docx","pptx"]); ok=st.form_submit_button("Submit Poster Order")
+    if ok:
+        if not n.strip() or not un.strip() or not details.strip(): st.error("Name, University aur Details required hain.")
+        else:
+            path=""
+            if f:
+                path=os.path.join(UPLOADS,secrets.token_hex(5)+"_"+re.sub(r"[^a-zA-Z0-9_.-]","_",f.name));open(path,"wb").write(f.getbuffer())
+            x("INSERT INTO poster_orders(phone,name,university,poster_type,details,file_path,created_at) VALUES(?,?,?,?,?,?,?)",(st.session_state.logged,n,un,typ,details,path,now()));st.success("Poster order save ho gaya.")
 
-            with c4:
-                st.write(
-                    f"**Request:** {request_id}"
-                )
+# Urdu: Portfolio mein teen projects show kiye ja rahe hain.
+def portfolio():
+    st.subheader("📁 Portfolio Showcase")
+    for title,desc in [("MF Traders Poster","Business promotional poster design."),("IMechE UET Taxila AKDC Team Mistry Phantoms","Engineering team and competition project showcase."),("Student Research Posters","Academic/research poster layouts.")]:
+        with st.container(border=True): st.markdown(f"### 🖼️ {title}");st.write(desc);st.caption("Project image yahan add ki ja sakti hai.")
 
-            if helper:
-                st.markdown(
-                    '<div class="helper-alert">🚨 YE IZZAT CIRCLE MEMBER HAI. IZZAT SE BAAT KARO</div>',
-                    unsafe_allow_html=True
-                )
-
-            st.markdown("#### 💼 Seller Offer")
-
-            with st.form(
-                f"offer_form_{request_id}"
-            ):
-                oc1, oc2 = st.columns(2)
-
-                with oc1:
-                    seller_name = st.text_input(
-                        "Seller Name",
-                        key=f"seller_name_{request_id}"
-                    )
-                    seller_phone = st.text_input(
-                        "Seller Phone",
-                        key=f"seller_phone_{request_id}"
-                    )
-
-                with oc2:
-                    offer_rate = st.number_input(
-                        "Your Rate (Rs.)",
-                        min_value=0.0,
-                        step=10.0,
-                        key=f"rate_{request_id}"
-                    )
-                    comment = st.text_input(
-                        "Comment",
-                        key=f"comment_{request_id}"
-                    )
-
-                submit_offer = st.form_submit_button(
-                    "💰 Offer Submit Karein"
-                )
-
-            if submit_offer:
-                if (
-                    not seller_name.strip()
-                    or not seller_phone.strip()
-                ):
-                    st.error(
-                        "Seller Name aur Phone required hain."
-                    )
-                elif offer_rate <= 0:
-                    st.error(
-                        "Valid rate enter karein."
-                    )
-                else:
-                    upsert_user(
-                        seller_name,
-                        seller_phone
-                    )
-
-                    offers = load_csv("offers")
-
-                    new_offer = {
-                        "Offer_ID": (
-                            "OFF-"
-                            + uuid.uuid4().hex[:8].upper()
-                        ),
-                        "Request_ID": request_id,
-                        "Seller_Name": seller_name.strip(),
-                        "Seller_Phone": seller_phone.strip(),
-                        "Rate": offer_rate,
-                        "Comment": comment.strip(),
-                        "Reported": "No",
-                        "Report_Reason": "",
-                        "Created_At": datetime.now().strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        ),
-                    }
-
-                    offers = pd.concat(
-                        [
-                            offers,
-                            pd.DataFrame([new_offer])
-                        ],
-                        ignore_index=True
-                    )
-
-                    save_csv(
-                        "offers",
-                        offers
-                    )
-
-                    st.success(
-                        "✅ Seller offer submit ho gayi."
-                    )
-                    st.rerun()
-
-            st.markdown("#### 📊 Offers — Izzat Score ke hisaab se")
-
-            offers = load_csv("offers")
-
-            if offers.empty:
-                st.info(
-                    "Abhi is request par koi offer nahi."
-                )
-                continue
-
-            request_offers = offers[
-                offers["Request_ID"].astype(str)
-                == request_id
-            ].copy()
-
-            if request_offers.empty:
-                st.info(
-                    "Abhi is request par koi offer nahi."
-                )
-                continue
-
-            request_offers["Seller_Izzat_Points"] = (
-                request_offers["Seller_Phone"]
-                .apply(get_izzat_points)
-            )
-
-            request_offers = request_offers.sort_values(
-                by=[
-                    "Seller_Izzat_Points",
-                    "Rate"
-                ],
-                ascending=[
-                    False,
-                    True
-                ]
-            )
-
-            for _, offer in request_offers.iterrows():
-                score = int(
-                    offer["Seller_Izzat_Points"]
-                )
-
-                reported = str(
-                    offer["Reported"]
-                ).lower() == "yes"
-
-                with st.container(border=True):
-                    a, b, c = st.columns(
-                        [2, 1, 2]
-                    )
-
-                    with a:
-                        st.write(
-                            f"**{offer['Seller_Name']}**"
-                        )
-                        st.write(
-                            f"📞 {offer['Seller_Phone']}"
-                        )
-                        st.markdown(
-                            f'<span class="score">⭐ Izzat Score: {score}</span>',
-                            unsafe_allow_html=True
-                        )
-
-                    with b:
-                        st.markdown(
-                            f"### Rs. {float(offer['Rate']):,.0f}"
-                        )
-
-                    with c:
-                        st.write(
-                            offer["Comment"]
-                            if str(offer["Comment"]).strip()
-                            else "No comment"
-                        )
-
-                        if reported:
-                            st.error(
-                                "⚠️ Reported"
-                            )
-                        else:
-                            with st.expander(
-                                "🚩 Report Seller"
-                            ):
-                                reason = st.text_input(
-                                    "Report Reason",
-                                    key=f"reason_{offer['Offer_ID']}"
-                                )
-
-                                if st.button(
-                                    "Report",
-                                    key=f"report_{offer['Offer_ID']}"
-                                ):
-                                    if not reason.strip():
-                                        st.error(
-                                            "Report reason likhein."
-                                        )
-                                    else:
-                                        offers = load_csv(
-                                            "offers"
-                                        )
-
-                                        offer_mask = (
-                                            offers["Offer_ID"].astype(str)
-                                            == str(
-                                                offer["Offer_ID"]
-                                            )
-                                        )
-
-                                        if offer_mask.any():
-                                            offers.loc[
-                                                offer_mask,
-                                                "Reported"
-                                            ] = "Yes"
-
-                                            offers.loc[
-                                                offer_mask,
-                                                "Report_Reason"
-                                            ] = reason.strip()
-
-                                            save_csv(
-                                                "offers",
-                                                offers
-                                            )
-
-                                            # Urdu: Report hone par seller ke Izzat Points mein se 5 points minus kiye ja rahe hain.
-                                            change_izzat_points(
-                                                offer["Seller_Phone"],
-                                                -5
-                                            )
-
-                                            st.success(
-                                                "🚩 Seller report ho gaya aur 5 Izzat Points cut ho gaye."
-                                            )
-                                            st.rerun()
-
-
-# Urdu: Sidebar mein sirf teen required concepts ki navigation rakhi ja rahi hai.
-def sidebar_navigation():
+# Urdu: Sidebar mein sirf requested IZZAT CIRCLE navigation rakhi ja rahi hai.
+def sidebar():
     with st.sidebar:
-        st.markdown(
-            "## 🤝 IZZAT CIRCLE"
-        )
-        st.caption(
-            "Madad karo, Izzat pao"
-        )
-
-        selected = st.radio(
-            "Navigation",
-            [
-                "Mohalla Help",
-                "Mohalla Bazar",
-                "Bare Bazar Boli"
-            ],
-            index=0
-        )
-
+        st.markdown("# 🤝 IZZAT CIRCLE");st.caption("Madad karo, Izzat pao");u=user(st.session_state.logged);st.success(f"👤 {u['name']}\n\n⭐ {int(u['izzat_points'])} Points") if u else None;st.divider()
+        p=st.radio("Navigation",["Izzat Circle","Mohalla Help","Mohalla Bazar","Bare Bazar Boli","Izzat Circle System","Unity"])
         st.divider()
+        if st.button("🚪 Logout",use_container_width=True): st.session_state.clear();st.rerun()
+        return p
 
-        st.markdown(
-            "### 5 Concepts"
-        )
-        st.caption(
-            "🤝 Mohalla Help\n\n"
-            "🛍️ Mohalla Bazar\n\n"
-            "🏪 Bare Bazar Boli\n\n"
-            "⭐ Izzat Circle System\n\n"
-            "🤲 Unity / Bhaichara"
-        )
-
-        st.divider()
-
-        st.markdown(
-            "**Pehle Izzat, Phir Deal**"
-        )
-
-    return selected
-
-
-# Urdu: Main function CSV files initialize karke sirf teen pages ko run karti hai.
+# Urdu: Main function login, profile aur page navigation ko control karti hai.
 def main():
-    initialize_csv_files()
+    init_db()
+    if "logged" not in st.session_state: login(); return
+    if not profile(): return
+    p=sidebar()
+    if p=="Izzat Circle":home()
+    elif p=="Mohalla Help":help_page()
+    elif p=="Mohalla Bazar":bazar_page()
+    elif p=="Bare Bazar Boli":boli_page()
+    elif p=="Izzat Circle System":system_page()
+    elif p=="Unity":unity_page()
 
-    selected = sidebar_navigation()
-
-    show_header()
-
-    if selected == "Mohalla Help":
-        mohalla_help()
-
-    elif selected == "Mohalla Bazar":
-        mohalla_bazar()
-
-    elif selected == "Bare Bazar Boli":
-        bare_bazar_boli()
-
-
-# Urdu: App ko direct run karne par main function start ki ja rahi hai.
-if __name__ == "__main__":
-    main()
+# Urdu: Program direct run hone par main app start ki ja rahi hai.
+if __name__=="__main__": main()
